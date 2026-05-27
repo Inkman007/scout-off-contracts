@@ -7,6 +7,9 @@ use types::{DataKey, Milestone, Validator};
 
 use soroban_sdk::{contract, contractimpl, Address, Env, String};
 
+const PERSISTENT_TTL_MIN: u32 = 500;
+const PERSISTENT_TTL_MAX: u32 = 2000;
+
 // Generated client for the progress contract — used for cross-contract calls.
 // The progress contract must be deployed and its address registered via
 // `set_progress_contract` before `approve_milestone` can advance levels.
@@ -75,6 +78,9 @@ impl VerificationContract {
         env.storage()
             .persistent()
             .set(&DataKey::Validator(wallet.clone()), &validator);
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::Validator(wallet.clone()), PERSISTENT_TTL_MIN, PERSISTENT_TTL_MAX);
 
         events::validator_registered(&env, &wallet);
         Ok(())
@@ -92,6 +98,9 @@ impl VerificationContract {
         env.storage()
             .persistent()
             .set(&DataKey::Validator(wallet.clone()), &validator);
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::Validator(wallet.clone()), PERSISTENT_TTL_MIN, PERSISTENT_TTL_MAX);
         events::validator_revoked(&env, &wallet);
         Ok(())
     }
@@ -138,6 +147,10 @@ impl VerificationContract {
             .persistent()
             .get(&DataKey::Validator(validator_wallet.clone()))
             .ok_or(VerificationError::ValidatorNotFound)?;
+
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::Validator(validator_wallet.clone()), PERSISTENT_TTL_MIN, PERSISTENT_TTL_MAX);
 
         if !validator.active {
             return Err(VerificationError::ValidatorInactive);
@@ -216,10 +229,15 @@ impl VerificationContract {
     }
 
     pub fn get_validator(env: Env, wallet: Address) -> Result<Validator, VerificationError> {
+        let validator = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Validator(wallet.clone()))
+            .ok_or(VerificationError::ValidatorNotFound)?;
         env.storage()
             .persistent()
-            .get(&DataKey::Validator(wallet))
-            .ok_or(VerificationError::ValidatorNotFound)
+            .extend_ttl(&DataKey::Validator(wallet), PERSISTENT_TTL_MIN, PERSISTENT_TTL_MAX);
+        Ok(validator)
     }
 
     pub fn is_active_validator(env: Env, wallet: Address) -> bool {
@@ -385,6 +403,26 @@ mod tests {
             &String::from_str(&env, "Some milestone"),
             &String::from_str(&env, "QmEvidence"),
         );
+    }
+
+    #[test]
+    fn test_validator_ttl_bump_survives_ledger_advancement() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let validator = Address::generate(&env);
+        client.register_validator(&validator, &String::from_str(&env, "UEFA B License"));
+
+        // Advance ledger sequence beyond PERSISTENT_TTL_MIN
+        env.ledger().with_mut(|li| {
+            li.sequence_number += 600;
+        });
+
+        // Validator should still be accessible after ledger advancement
+        let v = client.get_validator(&validator);
+        assert!(v.active);
+        assert!(client.is_active_validator(&validator));
     }
 
     #[test]
